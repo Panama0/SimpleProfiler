@@ -8,9 +8,20 @@ enable_testing()
 
 include(FetchContent)
 
+# sfml
+FetchContent_Declare(
+    SFML
+    GIT_REPOSITORY https://github.com/SFML/SFML.git
+    GIT_TAG 3.0.1
+)
+# option(SFML_BUILD_AUDIO "Build audio" OFF)
+# option(SFML_BUILD_NETWORK "Build network" OFF)
+FetchContent_MakeAvailable(SFML)
+
 # main
 set(SRC_FILES src/main.cpp)
 add_executable(${PROJECT_NAME} ${SRC_FILES})
+target_link_libraries(${PROJECT_NAME} PRIVATE SFML::Graphics)
 
 
 # tests
@@ -21,18 +32,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
+
 set(TEST_FILES test/timing.cpp)
 
 add_executable(${PROJECT_NAME}_Test ${TEST_FILES})
 
-target_link_libraries(${PROJECT_NAME}_Test PRIVATE GTest::gtest_main)
+target_link_libraries(${PROJECT_NAME}_Test PRIVATE GTest::gtest_main SFML::Graphics)
 
 target_include_directories(${PROJECT_NAME}_Test PUBLIC .)
 
 add_test(NAME ${PROJECT_NAME}_Test COMMAND ${PROJECT_NAME}_Test)
 
-if(MSVC)
-    target_compile_options(${PROJECT_NAME}_Test PRIVATE /W4)
-else()
-    target_compile_options(${PROJECT_NAME}_Test PRIVATE -Wall -Wextra -Wpedantic)
-endif()

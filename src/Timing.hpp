@@ -1,5 +1,8 @@
 #pragma once
 
+#include "SFML/Graphics/RenderWindow.hpp"
+#include "SFML/Window/Event.hpp"
+#include "SFML/Window/VideoMode.hpp"
 #include <cassert>
 #include <chrono>
 #include <iostream>
@@ -15,8 +18,8 @@ struct TimeNode
 
     const char* name{};
 
-    TimePoint start;
-    TimePoint end;
+    TimePoint start{};
+    TimePoint end{};
 
     TimeNode* parent{};
     std::vector<TimeNode*> children{};
@@ -123,28 +126,21 @@ private:
     static inline TimeNode* m_last{};
 };
 
-class Timer
+static void timerStart(const char* label)
 {
-public:
-protected:
-    void timerStart(const char* label)
-    {
-        TimeGraph::addNode(label);
-        TimeGraph::current().start = std::chrono::steady_clock::now();
-    }
+    TimeGraph::addNode(label);
+    TimeGraph::current().start = std::chrono::steady_clock::now();
+}
 
-    void timerEnd()
-    {
-        auto end{std::chrono::steady_clock::now()};
+static void timerEnd()
+{
+    auto end{std::chrono::steady_clock::now()};
 
-        TimeGraph::current().end = end;
-        TimeGraph::popNode();
-    }
+    TimeGraph::current().end = end;
+    TimeGraph::popNode();
+}
 
-private:
-};
-
-class ScopeTimer : public Timer
+class ScopeTimer
 {
 public:
     ScopeTimer(const char* label = "Scope") { timerStart(label); }
@@ -152,4 +148,51 @@ public:
     ~ScopeTimer() { timerEnd(); }
 
 private:
+};
+
+class Session
+{
+public:
+    void start(const char* name)
+    {
+        m_window.create(sf::VideoMode{{1280, 720}}, name);
+        m_window.setFramerateLimit(60);
+
+        run();
+    }
+
+    // get new data
+    void update()
+    {
+        // copy
+        m_tree = TimeGraph::getGraph(); 
+    }
+
+private:
+    void run()
+    {
+        bool running{true};
+
+        while(running)
+        {
+            // process events
+            while(auto event = m_window.pollEvent())
+            {
+                if(event->is<sf::Event::Closed>())
+                {
+                    running = false;
+                }
+            }
+
+            drawTree();
+
+            m_window.clear();
+            m_window.display();
+        }
+        m_window.close();
+    }
+
+    void drawTree() { return; }
+    sf::RenderWindow m_window;
+    TimeNode m_tree;
 };
