@@ -1,129 +1,102 @@
 #pragma once
 
+#include "SFML/Graphics/Color.hpp"
+#include "SFML/Graphics/Font.hpp"
+#include "SFML/Graphics/RectangleShape.hpp"
 #include "SFML/Graphics/RenderWindow.hpp"
+#include "SFML/Graphics/Text.hpp"
+#include "SFML/System/String.hpp"
+#include "SFML/System/Vector2.hpp"
 #include "SFML/Window/Event.hpp"
 #include "SFML/Window/VideoMode.hpp"
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <ratio>
+#include <sstream>
+#include <stack>
+#include <thread>
 #include <vector>
+
+#define MAX_DEPTH 15
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
 struct TimeNode
 {
     TimeNode() = default;
-    TimeNode(const char* n, TimeNode* p) : name(n), parent(p) {}
+    TimeNode(const char* _name, uint32_t _depth) : name{_name}, depth{_depth}
+    {
+    }
 
     const char* name{};
 
     TimePoint start{};
     TimePoint end{};
-
-    TimeNode* parent{};
-    std::vector<TimeNode*> children{};
+    uint32_t depth{};
 };
-
-inline double duration(const TimePoint& start, const TimePoint& end)
-{
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
-inline double duration(const TimeNode& node)
-{
-    return duration(node.start, node.end);
-}
 
 class TimeGraph
 {
 public:
-    // add child to the current node
-    static void addNode(const char* name)
+    static TimePoint now() { return std::chrono::steady_clock::now(); }
+
+    static double duration(const TimePoint& start, const TimePoint& end)
     {
-        if(!m_root)
-        {
-            init();
-        }
-
-        auto& node = m_nodeList.emplace_back(name, m_current);
-
-        m_current->children.emplace_back(&node);
-        m_current = &m_nodeList.back();
+        return std::chrono::duration_cast<
+                   std::chrono::duration<double, std::milli>>(end - start)
+            .count();
     }
 
-    // pop current node
+    static double duration(const TimeNode& node)
+    {
+        return duration(node.start, node.end);
+    }
+
+    static void addNode(const char* name)
+    {
+        if(m_nodeList.empty())
+        {
+            m_nodeList.reserve(1000);
+        }
+
+        auto& node = m_nodeList.emplace_back(name, depth());
+        m_runningTimers.emplace(&node);
+    }
+
     static void popNode()
     {
-        m_last = m_current;
+        assert(depth() != 0 && "No timer running");
 
-        if(m_current->parent)
-        {
-            m_current = m_current->parent;
-        }
-        else
-        {
-            // we are in the root
-            assert(false && !"Attempted to pop root\n");
-        }
+        m_lastEnded = m_runningTimers.top();
+        m_runningTimers.pop();
+    }
+
+    static void clear()
+    {
+        m_nodeList.clear();
+        m_runningTimers = {};
+        m_lastEnded = {};
     }
 
     // access functions
-    static TimeNode& current() { return *m_current; }
-
-    static TimeNode& getGraph() { return *m_root; }
-
-    static double getLastDuration()
+    static TimeNode& current()
     {
-        if(m_last)
-        {
-            return duration(*m_last);
-        }
-        else
-        {
-            return -1;
-        }
+        assert(depth() != 0 && "No timer running");
+        return *m_runningTimers.top();
     }
 
-    static void printGraph() { printNode(*m_root); }
+    static const std::vector<TimeNode>& getNodes() { return m_nodeList; }
 
-    static void printNode(TimeNode& node, int depth = 0)
-    {
-        // indent
-        int indentWidth{3};
-        for(int i{}; i < depth * indentWidth; i++)
-        {
-            std::cout << " ";
-        }
-        if(depth > 0)
-        {
-            std::cout << "└──";
-        }
-
-        std::cout << node.name << ": " << duration(node) << "ms" << std::endl;
-
-        for(const auto& child : node.children)
-        {
-            printNode(*child, depth + 1);
-        }
-    }
+    static double getLastDuration() { return duration(*m_lastEnded); }
 
 private:
-    static void init()
-    {
-        // default max
-        m_nodeList.reserve(1000);
-
-        m_nodeList.emplace_back("root", nullptr);
-        m_root = &m_nodeList.back();
-        m_current = m_root;
-    }
+    static uint32_t depth() { return m_runningTimers.size(); }
 
     static inline std::vector<TimeNode> m_nodeList;
-
-    static inline TimeNode* m_root{};
-    static inline TimeNode* m_current{};
-    static inline TimeNode* m_last{};
+    static inline std::stack<TimeNode*> m_runningTimers;
+    static inline TimeNode* m_lastEnded{};
 };
 
 static void timerStart(const char* label)
@@ -134,9 +107,7 @@ static void timerStart(const char* label)
 
 static void timerEnd()
 {
-    auto end{std::chrono::steady_clock::now()};
-
-    TimeGraph::current().end = end;
+    TimeGraph::current().end = std::chrono::steady_clock::now();
     TimeGraph::popNode();
 }
 
@@ -153,46 +124,143 @@ private:
 class Session
 {
 public:
-    void start(const char* name)
+    void start()
     {
-        m_window.create(sf::VideoMode{{1280, 720}}, name);
-        m_window.setFramerateLimit(60);
+        m_running = true;
 
-        run();
+        m_thread = std::thread(
+            [this]()
+            {
+                m_window.create(sf::VideoMode{{1280, 720}}, "Profiler");
+                m_window.setFramerateLimit(60);
+
+                run();
+            });
     }
 
     // get new data
-    void update()
+    void newFrame()
     {
+        // calculate how long the frame took
+        if(!m_firstFrame)
+        {
+            timerEnd();
+        }
+
         // copy
-        m_tree = TimeGraph::getGraph(); 
+        m_nodeList = TimeGraph::getNodes();
+        TimeGraph::clear();
+
+        // start new frame
+        timerStart("Frame");
+        m_firstFrame = false;
+    }
+
+    // end and rejoin main thread
+    void end()
+    {
+        m_running = false;
+        m_thread.join();
     }
 
 private:
     void run()
     {
-        bool running{true};
-
-        while(running)
+        while(m_running)
         {
+            m_window.clear();
+
             // process events
             while(auto event = m_window.pollEvent())
             {
                 if(event->is<sf::Event::Closed>())
                 {
-                    running = false;
+                    m_running = false;
                 }
             }
 
-            drawTree();
+            if(!m_nodeList.empty())
+            {
+                drawTree();
+            }
 
-            m_window.clear();
             m_window.display();
         }
         m_window.close();
     }
 
-    void drawTree() { return; }
+    void drawTree()
+    {
+        auto worldSize
+            = static_cast<sf::Vector2f>(m_window.getView().getSize());
+
+        // TODO: should be calculated seperately
+        auto start = m_nodeList.front();
+        auto frameDuration = static_cast<float>(TimeGraph::duration(start));
+
+
+        float borderWidth {1.f};
+        float barHeight{worldSize.y / MAX_DEPTH};
+
+        for(auto& point : m_nodeList)
+        {
+            // bar
+            auto pointDuration
+                = static_cast<float>(TimeGraph::duration(point));
+            float width{worldSize.x * (pointDuration / frameDuration) - borderWidth};
+
+            sf::RectangleShape bar{{width, barHeight}};
+            bar.setFillColor(colours(point.depth));
+            bar.setOutlineColor(sf::Color::White);
+            bar.setOutlineThickness(borderWidth);
+
+            auto yOffset = worldSize.y - barHeight - ((barHeight + borderWidth) * point.depth);
+
+            auto startOffset = static_cast<float>(
+                TimeGraph::duration(start.start, point.start));
+            auto xOffset = worldSize.x * (startOffset / frameDuration);
+
+            bar.setPosition({xOffset, yOffset});
+            m_window.draw(bar);
+
+            // text
+            std::ostringstream label;
+            label << point.name << " - " << TimeGraph::duration(point)
+                  << "ms.";
+            sf::Text tag{m_font, label.str()};
+            auto barCentre = bar.getGlobalBounds().getCenter();
+            auto offset = tag.getGlobalBounds().getCenter();
+            tag.setPosition(barCentre - offset);
+            m_window.draw(tag);
+        }
+    }
+
+    constexpr sf::Color colours(uint32_t index)
+    {
+        switch(index)
+        {
+        case 0:
+            return sf::Color::Red;
+        case 1:
+            return sf::Color::Blue;
+        case 2:
+            return sf::Color::Green;
+        case 3:
+            return sf::Color::Magenta;
+        case 4:
+            return sf::Color::Cyan;
+        default:
+            return sf::Color::White;
+        }
+    }
+
     sf::RenderWindow m_window;
-    TimeNode m_tree;
+    sf::Font m_font{"../../res/DroidSans.ttf"};
+
+    std::vector<TimeNode> m_nodeList;
+
+    std::thread m_thread;
+    bool m_running{false};
+
+    bool m_firstFrame{true};
 };
