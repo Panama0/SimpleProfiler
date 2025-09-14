@@ -1,10 +1,13 @@
 #pragma once
 
+#include "SFML/Graphics/CircleShape.hpp"
 #include "SFML/Graphics/Color.hpp"
 #include "SFML/Graphics/Font.hpp"
+#include "SFML/Graphics/Rect.hpp"
 #include "SFML/Graphics/RectangleShape.hpp"
 #include "SFML/Graphics/RenderWindow.hpp"
 #include "SFML/Graphics/Text.hpp"
+#include "SFML/Graphics/View.hpp"
 #include "SFML/System/String.hpp"
 #include "SFML/System/Vector2.hpp"
 #include "SFML/Window/Event.hpp"
@@ -18,6 +21,9 @@
 #include <stack>
 #include <thread>
 #include <vector>
+
+namespace SimpleProf
+{
 
 #define MAX_DEPTH 15
 
@@ -117,8 +123,6 @@ public:
     ScopeTimer(const char* label = "Scope") { timerStart(label); }
 
     ~ScopeTimer() { timerEnd(); }
-
-private:
 };
 
 class Session
@@ -132,6 +136,7 @@ public:
             [this]()
             {
                 m_window.create(sf::VideoMode{{1280, 720}}, "Profiler");
+                updateView({1280, 720});
                 m_window.setFramerateLimit(60);
 
                 run();
@@ -166,8 +171,12 @@ public:
 private:
     void run()
     {
+        std::vector<TimeNode> localNodes;
+
         while(m_running)
         {
+            localNodes.swap(m_nodeList);
+
             m_window.clear();
 
             // process events
@@ -177,11 +186,17 @@ private:
                 {
                     m_running = false;
                 }
+
+                if(auto resized = event->getIf<sf::Event::Resized>())
+                {
+                    m_window.setSize(resized->size);
+                    updateView(resized->size);
+                }
             }
 
-            if(!m_nodeList.empty())
+            if(!localNodes.empty())
             {
-                drawTree();
+                drawTree(localNodes);
             }
 
             m_window.display();
@@ -189,32 +204,33 @@ private:
         m_window.close();
     }
 
-    void drawTree()
+    void drawTree(const std::vector<TimeNode>& nodes)
     {
         auto worldSize
             = static_cast<sf::Vector2f>(m_window.getView().getSize());
 
         // TODO: should be calculated seperately
-        auto start = m_nodeList.front();
+        auto start = nodes.front();
         auto frameDuration = static_cast<float>(TimeGraph::duration(start));
 
-
-        float borderWidth {1.f};
+        float borderWidth{1.f};
         float barHeight{worldSize.y / MAX_DEPTH};
 
-        for(auto& point : m_nodeList)
+        for(auto& point : nodes)
         {
             // bar
             auto pointDuration
                 = static_cast<float>(TimeGraph::duration(point));
-            float width{worldSize.x * (pointDuration / frameDuration) - borderWidth};
+            float width{worldSize.x * (pointDuration / frameDuration)
+                        - borderWidth};
 
             sf::RectangleShape bar{{width, barHeight}};
             bar.setFillColor(colours(point.depth));
             bar.setOutlineColor(sf::Color::White);
             bar.setOutlineThickness(borderWidth);
 
-            auto yOffset = worldSize.y - barHeight - ((barHeight + borderWidth) * point.depth);
+            auto yOffset = worldSize.y - barHeight
+                           - ((barHeight + borderWidth) * point.depth);
 
             auto startOffset = static_cast<float>(
                 TimeGraph::duration(start.start, point.start));
@@ -224,15 +240,40 @@ private:
             m_window.draw(bar);
 
             // text
+            uint32_t textSize{20};
+
             std::ostringstream label;
             label << point.name << " - " << TimeGraph::duration(point)
                   << "ms.";
-            sf::Text tag{m_font, label.str()};
+            sf::Text tag{m_font, label.str(), textSize};
             auto barCentre = bar.getGlobalBounds().getCenter();
             auto offset = tag.getGlobalBounds().getCenter();
             tag.setPosition(barCentre - offset);
             m_window.draw(tag);
         }
+    }
+
+    void updateView(const sf::Vector2u& windowSize)
+    {
+        float windowRatio = windowSize.x / static_cast<float>(windowSize.y);
+        float viewRatio = m_view.getSize().x / m_view.getSize().y;
+
+        float sizeX = 1.f, sizeY = 1.f;
+        float posX = 0.f, posY = 0.f;
+
+        if(windowRatio > viewRatio)
+        {
+            sizeX = viewRatio / windowRatio;
+            posX = (1.f - sizeX) / 2.f;
+        }
+        else
+        {
+            sizeY = windowRatio / viewRatio;
+            posY = (1.f - sizeY) / 2.f;
+        }
+
+        m_view.setViewport(sf::FloatRect{{posX, posY}, {sizeX, sizeY}});
+        m_window.setView(m_view);
     }
 
     constexpr sf::Color colours(uint32_t index)
@@ -255,6 +296,7 @@ private:
     }
 
     sf::RenderWindow m_window;
+    sf::View m_view{sf::FloatRect{{}, {1280, 720}}};
     sf::Font m_font{"../../res/DroidSans.ttf"};
 
     std::vector<TimeNode> m_nodeList;
@@ -264,3 +306,4 @@ private:
 
     bool m_firstFrame{true};
 };
+}
