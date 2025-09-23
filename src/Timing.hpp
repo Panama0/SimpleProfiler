@@ -29,23 +29,31 @@ namespace SimpleProf
 
 using TimePoint = std::chrono::steady_clock::time_point;
 
-struct TimeNode
-{
-    TimeNode() = default;
-    TimeNode(const char* _name, uint32_t _depth) : name{_name}, depth{_depth}
-    {
-    }
-
-    const char* name{};
-
-    TimePoint start{};
-    TimePoint end{};
-    uint32_t depth{};
-};
-
-class TimeGraph
+// base singleton
+class ProfilerBase
 {
 public:
+    static ProfilerBase& get()
+    {
+        static ProfilerBase instance;
+        return instance;
+    }
+
+    struct TimeNode
+    {
+        TimeNode() = default;
+        TimeNode(const char* _name, uint32_t _depth)
+            : name{_name}, depth{_depth}
+        {
+        }
+
+        const char* name{};
+
+        TimePoint start{};
+        TimePoint end{};
+        uint32_t depth{};
+    };
+
     static TimePoint now() { return std::chrono::steady_clock::now(); }
 
     static double duration(const TimePoint& start, const TimePoint& end)
@@ -60,7 +68,7 @@ public:
         return duration(node.start, node.end);
     }
 
-    static void addNode(const char* name)
+    void startNode(const char* name)
     {
         if(m_nodeList.empty())
         {
@@ -69,17 +77,21 @@ public:
 
         auto& node = m_nodeList.emplace_back(name, depth());
         m_runningTimers.emplace(&node);
+
+        current().start = now();
     }
 
-    static void popNode()
+    void endNode()
     {
+        current().end = now();
+
         assert(depth() != 0 && "No timer running");
 
         m_lastEnded = m_runningTimers.top();
         m_runningTimers.pop();
     }
 
-    static void clear()
+    void clear()
     {
         m_nodeList.clear();
         m_runningTimers = {};
@@ -87,60 +99,62 @@ public:
     }
 
     // access functions
-    static TimeNode& current()
+    TimeNode& current()
     {
         assert(depth() != 0 && "No timer running");
         return *m_runningTimers.top();
     }
 
-    static const std::vector<TimeNode>& getNodes() { return m_nodeList; }
+    const std::vector<TimeNode>& getNodes() { return m_nodeList; }
 
-    static double getLastDuration() { return duration(*m_lastEnded); }
+    void swap(std::vector<TimeNode>& other) { m_nodeList.swap(other); }
+
+    double getLastDuration() { return duration(*m_lastEnded); }
 
 private:
-    static uint32_t depth() { return m_runningTimers.size(); }
+    ProfilerBase() = default;
+    ProfilerBase(const ProfilerBase&) = delete;
+    ProfilerBase& operator=(const ProfilerBase&) = delete;
 
-    static inline std::vector<TimeNode> m_nodeList;
-    static inline std::stack<TimeNode*> m_runningTimers;
-    static inline TimeNode* m_lastEnded{};
+    uint32_t depth() { return m_runningTimers.size(); }
+
+    std::vector<TimeNode> m_nodeList;
+    std::stack<TimeNode*> m_runningTimers;
+    TimeNode* m_lastEnded{};
 };
 
-static void timerStart(const char* label)
+class Timer
 {
-    TimeGraph::addNode(label);
-    TimeGraph::current().start = std::chrono::steady_clock::now();
-}
+public:
+    static void start(const char* label = "Timer")
+    {
+        ProfilerBase::get().startNode(label);
+    }
 
-static void timerEnd()
-{
-    TimeGraph::current().end = std::chrono::steady_clock::now();
-    TimeGraph::popNode();
-}
+    static void stop() { ProfilerBase::get().endNode(); }
+};
 
 class ScopeTimer
 {
 public:
-    ScopeTimer(const char* label = "Scope") { timerStart(label); }
+    ScopeTimer(const char* label = "Scope")
+    {
+        ProfilerBase::get().startNode(label);
+    }
 
-    ~ScopeTimer() { timerEnd(); }
+    ~ScopeTimer() { ProfilerBase::get().endNode(); }
 };
 
 class Session
 {
 public:
+    Session() : m_prof{ProfilerBase::get()} {}
+
     void start()
     {
         m_running = true;
 
-        m_thread = std::thread(
-            [this]()
-            {
-                m_window.create(sf::VideoMode{{1280, 720}}, "Profiler");
-                updateView({1280, 720});
-                m_window.setFramerateLimit(60);
-
-                run();
-            });
+        m_thread = std::thread([this]() { run(); });
     }
 
     // get new data
@@ -149,15 +163,15 @@ public:
         // calculate how long the frame took
         if(!m_firstFrame)
         {
-            timerEnd();
+            m_prof.endNode();
         }
 
         // copy
-        m_nodeList = TimeGraph::getNodes();
-        TimeGraph::clear();
+        m_nodes = m_prof.getNodes();
+        m_prof.clear();
 
         // start new frame
-        timerStart("Frame");
+        m_prof.startNode("Frame");
         m_firstFrame = false;
     }
 
@@ -171,11 +185,20 @@ public:
 private:
     void run()
     {
-        std::vector<TimeNode> localNodes;
+        m_window.create(sf::VideoMode{{1280, 720}}, "Profiler");
+        updateView({1280, 720});
+        m_window.setFramerateLimit(60);
+
+        if(!m_font.openFromFile("../../res/DroidSans.ttf"))
+        {
+            std::cerr << "Profiler: Font not found" << std::endl;
+        }
+
+        std::vector<ProfilerBase::TimeNode> localNodes;
 
         while(m_running)
         {
-            localNodes.swap(m_nodeList);
+            localNodes = m_nodes;
 
             m_window.clear();
 
@@ -204,14 +227,14 @@ private:
         m_window.close();
     }
 
-    void drawTree(const std::vector<TimeNode>& nodes)
+    void drawTree(const std::vector<ProfilerBase::TimeNode>& nodes)
     {
         auto worldSize
             = static_cast<sf::Vector2f>(m_window.getView().getSize());
 
         // TODO: should be calculated seperately
         auto start = nodes.front();
-        auto frameDuration = static_cast<float>(TimeGraph::duration(start));
+        auto frameDuration = static_cast<float>(ProfilerBase::duration(start));
 
         float borderWidth{1.f};
         float barHeight{worldSize.y / MAX_DEPTH};
@@ -220,7 +243,7 @@ private:
         {
             // bar
             auto pointDuration
-                = static_cast<float>(TimeGraph::duration(point));
+                = static_cast<float>(ProfilerBase::duration(point));
             float width{worldSize.x * (pointDuration / frameDuration)
                         - borderWidth};
 
@@ -233,7 +256,7 @@ private:
                            - ((barHeight + borderWidth) * point.depth);
 
             auto startOffset = static_cast<float>(
-                TimeGraph::duration(start.start, point.start));
+                ProfilerBase::duration(start.start, point.start));
             auto xOffset = worldSize.x * (startOffset / frameDuration);
 
             bar.setPosition({xOffset, yOffset});
@@ -243,7 +266,8 @@ private:
             uint32_t textSize{20};
 
             std::ostringstream label;
-            label << point.name << " - " << TimeGraph::duration(point)
+            label << std::fixed << std::setprecision(2);
+            label << point.name << " - " << ProfilerBase::duration(point)
                   << "ms.";
             sf::Text tag{m_font, label.str(), textSize};
             auto barCentre = bar.getGlobalBounds().getCenter();
@@ -297,9 +321,10 @@ private:
 
     sf::RenderWindow m_window;
     sf::View m_view{sf::FloatRect{{}, {1280, 720}}};
-    sf::Font m_font{"../../res/DroidSans.ttf"};
+    sf::Font m_font{};
 
-    std::vector<TimeNode> m_nodeList;
+    ProfilerBase& m_prof;
+    std::vector<ProfilerBase::TimeNode> m_nodes;
 
     std::thread m_thread;
     bool m_running{false};
